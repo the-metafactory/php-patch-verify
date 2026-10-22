@@ -3,3 +3,9 @@ bun.lockb
 *.log
 .DS_Store
 /hardening/
+
+# scan outputs / host reports — never source-control or leak host findings
+/*.html
+*-report.html
+*.northpower.com.html
+reports/
