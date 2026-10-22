@@ -50,6 +50,7 @@ The agent then follows `SKILL.md`, running the tools below.
 bun Tools/CheckHost.ts --local                     # on the host: php -v, php -i
 bun Tools/CheckHost.ts --url https://host/          # remote banner + cookie
 bun Tools/CheckHost.ts --url https://host/ --probe  # active: banner-hidden + body-size cap
+bun Tools/CheckHost.ts --url https://host/ --fingerprint  # is this PHP? (safe GETs)
 bun Tools/CheckHost.ts --local --nginx /etc/nginx/nginx.conf --systemd unit.conf --cgroup
 # output: --html (page), --json (SIEM/CI), --strict (CI exit), --no-color
 

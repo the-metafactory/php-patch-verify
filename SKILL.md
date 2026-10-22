@@ -56,6 +56,7 @@ cd ~/.soma/skills/php-patch-verify/Tools
 bun CheckHost.ts --local                               # on the host (php -v, php -i)
 bun CheckHost.ts --ini /etc/php/8.3/fpm/pool.d/app3.conf --uploads
 bun CheckHost.ts --url https://host.example.com/      # remote banner (headers only)
+bun CheckHost.ts --url https://host/ --fingerprint  # is this PHP? (safe GETs)
 bun CheckHost.ts --version 8.3.36
 
 # Server layer (O2) — combine freely, with or without a PHP-layer mode:
