@@ -17,6 +17,22 @@ audits the interim mitigations CERT-EU recommends where patching has to wait.
 Fixed releases: **8.5.12, 8.4.27, 8.3.36, 8.2.35**. Branches 8.1 and older are
 end-of-life; only a vendor or source backport fixes them.
 
+## How to test a host — the short version
+
+1. **Is it PHP?** `bun Tools/CheckHost.ts --url https://HOST/ --fingerprint`
+   (the version banner is often off, so confirm it is PHP first).
+2. **What version?** On the host: `bun Tools/CheckHost.ts --local`. This is the
+   only step that *proves* the patch. A remote `--url` banner is a hint, not proof.
+3. **Are the mitigations in place?** `--local` or `--ini FILE`, plus
+   `--nginx` / `--apache` / `--systemd` / `--cgroup`. Add `--probe` to a `--url`
+   run to test them against a live host.
+4. **Fix if needed:** `bun Tools/Harden.ts --sapi SAPI --version X.Y.Z` prints the
+   config; apply it (confirmed), restart workers, then re-run steps 2–3.
+5. **Record:** add `--html` for a shareable page, or `--json` for SIEM / CI.
+
+Only step 2 on the host proves the patch. Everything remote is a hint or a
+hardening test, never proof of the fix.
+
 ## Scope — what this skill does and does not do
 
 **Does:** version detection, SAPI identification, configuration auditing of the
@@ -57,6 +73,7 @@ bun CheckHost.ts --local                               # on the host (php -v, ph
 bun CheckHost.ts --ini /etc/php/8.3/fpm/pool.d/app3.conf --uploads
 bun CheckHost.ts --url https://host.example.com/      # remote banner (headers only)
 bun CheckHost.ts --url https://host/ --fingerprint  # is this PHP? (safe GETs)
+bun CheckHost.ts --url https://host/ --probe       # active: banner gone + body-size cap
 bun CheckHost.ts --version 8.3.36
 
 # Server layer (O2) — combine freely, with or without a PHP-layer mode:
@@ -128,10 +145,28 @@ next step is an on-host `--local` run, not a remote guess.
 | Is the running version actually fixed? | `--local` on the host (authoritative) |
 | Are the mitigations configured? | `--local` or `--ini <pool/ini file>` |
 | Quick external view of app3 from outside | `--url` (banner only; cannot confirm patch level) |
+| Is this even PHP? (banner may be off) | `--url --fingerprint` |
+| Test the mitigations against a live host | `--url --probe` |
 
 The remote banner is a hint, not proof. `expose_php=Off` (correct hardening)
 hides the version entirely, so a clean banner check still needs a `--local` or
 `--ini` run on the host to confirm the patch.
+
+## Reading the report
+
+One overall verdict, then the checks grouped by severity (failures first).
+
+- **Overall verdict:** `PATCHED` (version at or above the fix, nothing failing),
+  `ACTION REQUIRED` (a vulnerable version or any FAIL), or `INCONCLUSIVE` (could
+  not determine — usually a remote scan with the banner off, meaning "run `--local`").
+- **Per check:**
+  - `FAIL` — a real problem: a vulnerable version, or a mitigation that is off.
+  - `WARN` — a gap to tighten: no body-size cap, banner exposed, a missing limit.
+  - `PASS` — the control is in place.
+  - `INFO` — context, not pass/fail: response headers, fingerprint tells.
+- Each line shows a code (`VER`, `M1`, `T1`, `FP`) and a one-line fix. The summary
+  line repeats the counts and the overall verdict.
+- Exit is 0 by default; add `--strict` to exit non-zero on `ACTION REQUIRED` for CI.
 
 ## What it checks
 
