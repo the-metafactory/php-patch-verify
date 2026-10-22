@@ -463,6 +463,59 @@ async function runProbe(url: string, sizeBytes: number, checks: Check[]) {
   }
 }
 
+// ── Fingerprint (opt-in): is this even PHP? Short, safe GETs only ─────
+// Probabilistic, never proof. A fixed small list — not content discovery.
+async function runFingerprint(url: string, checks: Check[]) {
+  const base = url.replace(/\/+$/, "");
+  const tells: string[] = [];
+  const get = async (path: string) => {
+    try { return await fetch(base + path, { method: "GET", redirect: "manual" }); }
+    catch { return null; }
+  };
+
+  // 1. Framework / PHP session cookies (independent of the version banner).
+  const r0 = await get("/");
+  if (r0) {
+    const cookies = typeof (r0.headers as any).getSetCookie === "function"
+      ? (r0.headers as any).getSetCookie() as string[]
+      : [r0.headers.get("set-cookie") || ""];
+    const m = cookies.join("; ").match(/\b(PHPSESSID|laravel_session|symfony|ci_session|CAKEPHP|XSRF-TOKEN|wordpress_[a-z]*)/i);
+    if (m) { tells.push(`cookie ${m[1]}`);
+      checks.push({ id: "FP1", status: "INFO", title: "Framework cookie (fingerprint)",
+        detail: `Set-Cookie includes "${m[1]}", a PHP-stack tell.` }); }
+  }
+
+  // 2. Does a .php entry point execute (vs 404, vs raw source)?
+  const rphp = await get("/index.php");
+  if (rphp && rphp.status < 400) {
+    const body = await rphp.text().catch(() => "");
+    if (/<\?php/i.test(body)) {
+      tells.push(".php source exposed");
+      checks.push({ id: "FP2", status: "WARN", title: ".php not executed (fingerprint)",
+        detail: "/index.php returned raw PHP source (`<?php` visible). PHP is present but the server is not executing it — a serious misconfiguration to fix." });
+    } else {
+      tells.push(`/index.php ${rphp.status}`);
+      checks.push({ id: "FP2", status: "INFO", title: ".php endpoint (fingerprint)",
+        detail: `GET /index.php returned HTTP ${rphp.status}, consistent with a PHP front controller.` });
+    }
+  }
+
+  // 3. A few well-known PHP app paths (fixed list, not enumeration).
+  for (const p of ["/wp-login.php", "/xmlrpc.php", "/administrator/"]) {
+    const r = await get(p);
+    if (r && [200, 301, 302].includes(r.status)) {
+      tells.push(`${p} ${r.status}`);
+      checks.push({ id: "FP3", status: "INFO", title: "Known PHP app path (fingerprint)",
+        detail: `${p} responded HTTP ${r.status}, a PHP-application tell.` });
+    }
+  }
+
+  checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
+    detail: tells.length
+      ? `Likely PHP. Tells: ${tells.join(", ")}. Fingerprinting is probabilistic — confirm the version on the host with --local.`
+      : "No PHP tells from a short safe probe (banner, cookies, /index.php, known paths all silent). It may not be PHP, or it is well hardened. Confirm with --local." });
+}
+
 // ── Reporting ────────────────────────────────────────────────────────
 
 function render(checks: Check[], verdict: string | undefined, json: boolean, color: boolean, subtitle: string): boolean {
@@ -627,6 +680,7 @@ PHP layer:
   bun CheckHost.ts --ini <file> [--uploads]  Audit a php.ini / FPM pool file
   bun CheckHost.ts --url <url>               Read remote banner + cookie (headers only)
   bun CheckHost.ts --url <url> --probe       Active test: banner-hidden + body-size cap
+  bun CheckHost.ts --url <url> --fingerprint Detect whether the host is PHP (safe GETs)
   bun CheckHost.ts --version 8.3.36          Evaluate a version string
 
 Server layer (combine freely, with or without a PHP-layer mode):
@@ -662,6 +716,7 @@ Generate matching config with Harden.ts. Neither tool exploits either CVE.`);
       const sz = toBytes(val("--probe-size") || "9m") ?? 9 * 1024 * 1024;
       await runProbe(val("--url")!, sz, checks);
     }
+    if (has("--fingerprint")) await runFingerprint(val("--url")!, checks);
   } else if (has("--local")) {
     verdict = runLocal(checks, opts);
   }
