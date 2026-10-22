@@ -468,52 +468,75 @@ async function runProbe(url: string, sizeBytes: number, checks: Check[]) {
 async function runFingerprint(url: string, checks: Check[]) {
   const base = url.replace(/\/+$/, "");
   const tells: string[] = [];
-  const get = async (path: string) => {
-    try { return await fetch(base + path, { method: "GET", redirect: "manual" }); }
-    catch { return null; }
+  // Probe a path: capture status, redirect target, cookies, and body length.
+  // The body length matters — a catch-all returns the same page (same length)
+  // for every path, so status alone cannot tell a real app from a placeholder.
+  const probe = async (path: string) => {
+    try {
+      const r = await fetch(base + path, { method: "GET", redirect: "manual" });
+      let body = ""; try { body = (await r.text()).slice(0, 100000); } catch {}
+      const loc = (r.headers.get("location") || "").replace(/^https?:\/\/[^/]+/, "");
+      const cookies = typeof (r.headers as any).getSetCookie === "function"
+        ? (r.headers as any).getSetCookie() as string[]
+        : [r.headers.get("set-cookie") || ""];
+      return { status: r.status, loc, body, cookies, sig: `${r.status}|${loc}|${body.length}` };
+    } catch { return null; }
   };
 
-  // 1. Framework / PHP session cookies (independent of the version banner).
-  const r0 = await get("/");
-  if (r0) {
-    const cookies = typeof (r0.headers as any).getSetCookie === "function"
-      ? (r0.headers as any).getSetCookie() as string[]
-      : [r0.headers.get("set-cookie") || ""];
-    const m = cookies.join("; ").match(/\b(PHPSESSID|laravel_session|symfony|ci_session|CAKEPHP|XSRF-TOKEN|wordpress_[a-z]*)/i);
+  // Baseline: a path that cannot exist. Anything matching it is a catch-all.
+  const baseP = await probe("/zz" + Math.random().toString(36).slice(2, 10) + ".php");
+  const baseSig = baseP?.sig ?? "none";
+  const distinct = (p: Awaited<ReturnType<typeof probe>>) => p !== null && p.sig !== baseSig;
+
+  // 1. Framework / PHP session cookies on "/".
+  const root = await probe("/");
+  if (root) {
+    const m = root.cookies.join("; ").match(/\b(PHPSESSID|laravel_session|symfony|ci_session|CAKEPHP|XSRF-TOKEN|wordpress_[a-z]*)/i);
     if (m) { tells.push(`cookie ${m[1]}`);
       checks.push({ id: "FP1", status: "INFO", title: "Framework cookie (fingerprint)",
         detail: `Set-Cookie includes "${m[1]}", a PHP-stack tell.` }); }
   }
 
-  // 2. Does a .php entry point execute (vs 404, vs raw source)?
-  const rphp = await get("/index.php");
-  if (rphp && rphp.status < 400) {
-    const body = await rphp.text().catch(() => "");
-    if (/<\?php/i.test(body)) {
+  // 2. /index.php: raw source leak, or a response distinct from a nonexistent path.
+  const php = await probe("/index.php");
+  if (php) {
+    if (/<\?php/i.test(php.body)) {
       tells.push(".php source exposed");
       checks.push({ id: "FP2", status: "WARN", title: ".php not executed (fingerprint)",
-        detail: "/index.php returned raw PHP source (`<?php` visible). PHP is present but the server is not executing it — a serious misconfiguration to fix." });
-    } else {
-      tells.push(`/index.php ${rphp.status}`);
+        detail: "/index.php returned raw PHP source (`<?php` visible). PHP is present but not being executed — a serious misconfiguration." });
+    } else if (distinct(php) && php.status < 400) {
+      tells.push(`/index.php ${php.status}`);
       checks.push({ id: "FP2", status: "INFO", title: ".php endpoint (fingerprint)",
-        detail: `GET /index.php returned HTTP ${rphp.status}, consistent with a PHP front controller.` });
+        detail: `/index.php (HTTP ${php.status}) answers differently from a nonexistent path, consistent with a PHP front controller.` });
     }
   }
 
-  // 3. A few well-known PHP app paths (fixed list, not enumeration).
+  // 3. Known PHP app paths — distinct from baseline, and confirm by content when possible.
   for (const p of ["/wp-login.php", "/xmlrpc.php", "/administrator/"]) {
-    const r = await get(p);
-    if (r && [200, 301, 302].includes(r.status)) {
-      tells.push(`${p} ${r.status}`);
-      checks.push({ id: "FP3", status: "INFO", title: "Known PHP app path (fingerprint)",
-        detail: `${p} responded HTTP ${r.status}, a PHP-application tell.` });
-    }
+    const r = await probe(p);
+    if (!distinct(r) || r!.status >= 500) continue;
+    const content = /name="(log|pwd)"|wp-submit|\/wp-(content|includes)\//i.test(r!.body)
+      || (p === "/xmlrpc.php" && /XML-RPC server accepts POST/i.test(r!.body));
+    tells.push(`${p} ${r!.status}${content ? " (content)" : ""}`);
+    checks.push({ id: "FP3", status: "INFO", title: "Known PHP app path (fingerprint)",
+      detail: `${p} (HTTP ${r!.status}) differs from a nonexistent path${content ? " and returns PHP-app content" : ""}, a PHP tell.` });
   }
 
-  checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
-    detail: tells.length
-      ? `Likely PHP. Tells: ${tells.join(", ")}. Fingerprinting is probabilistic — confirm the version on the host with --local.`
-      : "No PHP tells from a short safe probe (banner, cookies, /index.php, known paths all silent). It may not be PHP, or it is well hardened. Confirm with --local." });
+  // Verdict.
+  const catchAll = root !== null && baseP !== null && root.sig === baseSig;
+  if (tells.length) {
+    checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
+      detail: `Likely PHP. Tells: ${tells.join(", ")}. Probabilistic — confirm the version on the host with --local.` });
+  } else if (baseSig.startsWith("3")) {
+    checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
+      detail: `No PHP signal. Every path, including a random one, returns the same ${baseSig.split("|")[0]} redirect — an authenticating gateway or catch-all, not a PHP app. Confirm with --local.` });
+  } else if (catchAll) {
+    checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
+      detail: "No PHP signal. Every path, including a random one, returns the same page — a placeholder or catch-all, not a PHP app. Confirm with --local." });
+  } else {
+    checks.push({ id: "FP", status: "INFO", title: "PHP fingerprint verdict",
+      detail: "No PHP tells, and nothing distinguishes known paths from a nonexistent one. It may not be PHP, or it is well hardened. Confirm with --local." });
+  }
 }
 
 // ── Reporting ────────────────────────────────────────────────────────
